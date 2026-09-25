@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>字幕校稿对齐工具</title>
+<style>
+  :root {
+    --border: #d0d7de;
+    --bg: #f6f8fa;
+    --match: #ffffff;
+    --script-only: #fff4e5;
+    --srt-only: #e8f0fe;
+    --accent: #1f6feb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px 24px 48px;
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #1f2328; background: var(--bg);
+  }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  .hint { color: #57606a; font-size: 13px; margin-bottom: 14px; }
+  .panels { display: flex; gap: 16px; flex-wrap: wrap; }
+  .panel { flex: 1 1 420px; display: flex; flex-direction: column; }
+  .panel label { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+  textarea {
+    width: 100%; min-height: 220px; resize: vertical;
+    font-family: "SF Mono", Consolas, "Courier New", monospace; font-size: 13px;
+    padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: #fff;
+  }
+  .toolbar { display: flex; align-items: center; gap: 12px; margin: 14px 0; flex-wrap: wrap; }
+  button {
+    padding: 7px 18px; font-size: 14px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--border); background: #fff;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .gap-input { font-size: 13px; color: #57606a; }
+  .gap-input input { width: 60px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 4px; }
+  #error { color: #cf222e; font-size: 13px; margin: 6px 0; white-space: pre-wrap; }
+  #stats { font-size: 13px; margin: 10px 0; display: none; flex-wrap: wrap; gap: 8px; }
+  .chip { padding: 3px 10px; border-radius: 12px; background: #eaeef2; }
+  .chip.match { background: #dafbe1; }
+  .chip.script_only { background: #ffe9c8; }
+  .chip.srt_only { background: #cfe3ff; }
+  table { border-collapse: collapse; width: 100%; background: #fff; font-size: 13px; }
+  th, td { border: 1px solid var(--border); padding: 6px 8px; vertical-align: top; text-align: left; }
+  th { background: #eaeef2; position: sticky; top: 0; z-index: 1; }
+  td.idx { color: #57606a; white-space: nowrap; width: 1%; }
+  td.time { font-family: Consolas, monospace; white-space: nowrap; font-size: 12px; }
+  td.text { white-space: pre-wrap; word-break: break-word; min-width: 180px; }
+  td.cost { text-align: right; white-space: nowrap; width: 1%; }
+  tr.script_only td { background: var(--script-only); }
+  tr.srt_only td { background: var(--srt-only); }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap; }
+  .badge.match { background: #dafbe1; }
+  .badge.script_only { background: #ffe9c8; }
+  .badge.srt_only { background: #cfe3ff; }
+  .norm { color: #8250df; font-size: 12px; }
+  #result { display: none; }
+</style>
+</head>
+<body>
+<h1>字幕校稿对齐工具</h1>
+<div class="hint">
+  左侧粘贴逐行对白稿（每行一句），右侧粘贴 SRT 字幕。系统去空白与标点后，
+  以归一化字符编辑距离为匹配代价、跳过任一条计 0.45，求最低代价全局单调对齐。
+</div>
+
+<div class="panels">
+  <div class="panel">
+    <label>逐行对白稿</label>
+    <textarea id="script" placeholder="每行一句对白，空行忽略"></textarea>
+  </div>
+  <div class="panel">
+    <label>SRT 字幕</label>
+    <textarea id="srt" placeholder="1&#10;00:00:01,000 --> 00:00:02,500&#10;字幕文本"></textarea>
+  </div>
+</div>
+
+<div class="toolbar">
+  <button class="primary" id="alignBtn">开始对齐</button>
+  <button id="sampleBtn">填入示例</button>
+  <label class="gap-input">跳过代价 <input id="gapCost" type="number" value="0.45" step="0.05" min="0.05" max="1"></label>
+  <label class="gap-input"><input type="checkbox" id="showNorm"> 显示归一化文本</label>
+  <button id="csvBtn" disabled>下载 CSV</button>
+</div>
+
+<div id="error"></div>
+<div id="stats"></div>
+
+<div id="result">
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>状态</th><th>对白稿</th><th>字幕</th><th>时间码</th><th>匹配代价</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<script>
+const STATUS_LABEL = { match: "匹配", script_only: "缺字幕", srt_only: "缺剧本" };
+let lastRows = null;
+
+const $ = id => document.getElementById(id);
+
+$("sampleBtn").onclick = () => {
+  $("script").value = [
+    "甲：你来了。",
+    "乙：我来了。",
+    "甲：吃饭了吗？",
+    "乙：吃过了。"
+  ].join("\n");
+  $("srt").value = [
+    "1\n00:00:01,000 --> 00:00:02,500\n甲：你来了",
+    "2\n00:00:03,000 --> 00:00:04,000\n乙：我来了！",
+    "3\n00:00:05,000 --> 00:00:06,000\n本场演出由某某赞助",
+    "4\n00:00:07,000 --> 00:00:08,500\n乙：吃过了。"
+  ].join("\n\n");
+};
+
+$("alignBtn").onclick = async () => {
+  $("error").textContent = "";
+  $("alignBtn").disabled = true;
+  try {
+    const resp = await fetch("/api/align", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        script: $("script").value,
+        srt: $("srt").value,
+        gap_cost: parseFloat($("gapCost").value) || 0.45
+      })
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || ("请求失败：" + resp.status));
+    lastRows = data.rows;
+    renderStats(data.stats);
+    renderRows(data.rows);
+    $("csvBtn").disabled = false;
+  } catch (e) {
+    $("error").textContent = e.message;
+  } finally {
+    $("alignBtn").disabled = false;
+  }
+};
+
+$("showNorm").onchange = () => { if (lastRows) renderRows(lastRows); };
+
+function renderStats(s) {
+  const el = $("stats");
+  el.style.display = "flex";
+  el.innerHTML = "";
+  const chips = [
+    [`剧本 ${s.script_count} 条`, ""],
+    [`字幕 ${s.srt_count} 条`, ""],
+    [`匹配 ${s.match}`, "match"],
+    [`缺字幕 ${s.script_only}`, "script_only"],
+    [`缺剧本 ${s.srt_only}`, "srt_only"],
+    [`总代价 ${s.total_cost}`, ""],
+    [`平均匹配代价 ${s.avg_match_cost}`, ""]
+  ];
+  for (const [text, cls] of chips) {
+    const span = document.createElement("span");
+    span.className = "chip" + (cls ? " " + cls : "");
+    span.textContent = text;
+    el.appendChild(span);
+  }
+}
+
+function renderRows(rows) {
+  const tbody = $("tbody");
+  tbody.innerHTML = "";
+  const showNorm = $("showNorm").checked;
+  const frag = document.createDocumentFragment();
+  rows.forEach((r, k) => {
+    const tr = document.createElement("tr");
+    tr.className = r.status;
+
+    const tdIdx = document.createElement("td");
+    tdIdx.className = "idx";
+    tdIdx.textContent = k + 1;
+    tr.appendChild(tdIdx);
+
+    const tdStatus = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = "badge " + r.status;
+    badge.textContent = STATUS_LABEL[r.status];
+    tdStatus.appendChild(badge);
+    tr.appendChild(tdStatus);
+
+    const tdScript = document.createElement("td");
+    tdScript.className = "text";
+    if (r.script_line != null) {
+      tdScript.textContent = `[${r.script_line}] ${r.script_text}`;
+      if (showNorm && r.script_norm) {
+        const div = document.createElement("div");
+        div.className = "norm";
+        div.textContent = r.script_norm;
+        tdScript.appendChild(div);
+      }
+    }
+    tr.appendChild(tdScript);
+
+    const tdSrt = document.createElement("td");
+    tdSrt.className = "text";
+    if (r.srt_index != null) {
+      tdSrt.textContent = `#${r.srt_index} ${r.srt_text}`;
+      if (showNorm && r.srt_norm) {
+        const div = document.createElement("div");
+        div.className = "norm";
+        div.textContent = r.srt_norm;
+        tdSrt.appendChild(div);
+      }
+    }
+    tr.appendChild(tdSrt);
+
+    const tdTime = document.createElement("td");
+    tdTime.className = "time";
+    tdTime.textContent = r.start ? `${r.start} → ${r.end}` : "";
+    tr.appendChild(tdTime);
+
+    const tdCost = document.createElement("td");
+    tdCost.className = "cost";
+    tdCost.textContent = r.cost == null ? "—" : r.cost.toFixed(4);
+    tr.appendChild(tdCost);
+
+    frag.appendChild(tr);
+  });
+  tbody.appendChild(frag);
+  $("result").style.display = "block";
+}
+
+function csvEscape(v) {
+  v = v == null ? "" : String(v);
+  return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+}
+
+$("csvBtn").onclick = () => {
+  if (!lastRows) return;
+  const header = ["序号", "状态", "剧本行号", "字幕序号", "剧本原文", "字幕原文", "开始时间", "结束时间", "匹配代价"];
+  const lines = [header.map(csvEscape).join(",")];
+  lastRows.forEach((r, k) => {
+    lines.push([
+      k + 1,
+      STATUS_LABEL[r.status],
+      r.script_line,
+      r.srt_index,
+      r.script_text,
+      r.srt_text,
+      r.start,
+      r.end,
+      r.cost == null ? "" : r.cost.toFixed(4)
+    ].map(csvEscape).join(","));
+  });
+  const blob = new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "字幕校稿对齐结果.csv";
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+</script>
+</body>
+</html>
